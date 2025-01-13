@@ -15,17 +15,19 @@ from megatron.data.gpt_dataset import build_train_valid_test_datasets
 from megatron.model import GPTModel, GPTModelPipe
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
-from megatron.utils import average_losses_across_data_parallel_group
+from megatron.utils import average_losses_across_data_parallel_group, update_rotary_pos_emb
 from megatron.arguments import core_transformer_config_from_args
 
 import deepspeed
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.accelerator.real_accelerator import get_accelerator
+from deepspeed.sequence.fpdt_layer import FPDT_InputConstruct
 import os
 import subprocess
 
 from torch import nn
 import torch.nn.functional as F
+
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
@@ -35,15 +37,20 @@ def model_provider(pre_process=True, post_process=True):
 
     args = get_args()
     config = core_transformer_config_from_args(args)
-    '''
-    with deepspeed.zero.Init(data_parallel_group=mpu.get_data_parallel_group(),
+    if hasattr(mpu, 'get_sequence_data_parallel_group'):
+        dpg = mpu.get_sequence_data_parallel_group()
+    elif hasattr(mpu, 'get_data_parallel_group'):
+        dpg = mpu.get_data_parallel_group()
+    else:
+        dpg = None
+    with deepspeed.zero.Init(data_parallel_group=dpg,
                              remote_device=None if args.remote_device == 'none' else args.remote_device,
-                             config_dict_or_path=args.deepspeed_config,
+                             config_dict_or_path=args.deepspeed_config_dict,
                              enabled=args.zero_stage == 3,
                              mpu=mpu):
         if args.deepspeed and not args.no_pipeline_parallel:
             model = GPTModelPipe(
-                config,
+                config=config,
                 num_tokentypes=0,
                 parallel_output=True
             )
@@ -68,6 +75,10 @@ def model_provider(pre_process=True, post_process=True):
             # Attention mask must be bool.
             args.attn_mask = attention_mask.to(torch.bool)
 
+            # For prertaining, since sequence length is fixed, cache rotary embedding in args, to avoid communicating around
+            if args.use_rotary_position_embeddings:
+                update_rotary_pos_emb(args.seq_length)
+
         else:
             model = GPTModel(
                 config,
@@ -78,7 +89,7 @@ def model_provider(pre_process=True, post_process=True):
             )
     '''
     model = GPTModel(
-                config,
+                config=config,
                 num_tokentypes=0,
                 parallel_output=True,
                 pre_process=pre_process,
@@ -110,12 +121,38 @@ def get_batch(data_iterator):
     tokens = tokens_[:, :-1].contiguous()
 
     # Get the masks and postition ids.
+    skip_mask = args.use_flash_attn or args.use_flash_attn_triton
     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
         tokens,
         tokenizer.eod,
         args.reset_position_ids,
         args.reset_attention_mask,
-        args.eod_mask_loss)
+        args.eod_mask_loss,
+        skip_mask)
+
+    # For DS's sequence parallel
+    seq_parallel_world_size = mpu.get_sequence_parallel_world_size()
+    seq_parallel_world_rank = mpu.get_sequence_parallel_rank()
+
+    if args.ds_sequence_parallel_fpdt:
+        return FPDT_InputConstruct(tokens, labels, loss_mask, attention_mask, position_ids, args, seq_parallel_world_size, seq_parallel_world_rank).generate()
+
+    # For Megatron's sequence parallel
+    if args.sequence_parallel:
+        seq_parallel_world_size = mpu.get_tensor_model_parallel_world_size()
+        seq_parallel_world_rank = mpu.get_tensor_model_parallel_rank()
+    seq_length = tokens.size(1)
+
+    assert seq_length % seq_parallel_world_size == 0
+    sub_seq_length = seq_length // seq_parallel_world_size
+    sub_seq_start = seq_parallel_world_rank * sub_seq_length
+    sub_seq_end = (seq_parallel_world_rank + 1) * sub_seq_length
+
+    tokens = tokens[:, sub_seq_start:sub_seq_end]
+    position_ids = position_ids[:, sub_seq_start:sub_seq_end]
+    # For DS's sequence parallel
+    if mpu.get_sequence_parallel_world_size() > 1:
+        labels = labels[:, sub_seq_start:sub_seq_end]
 
     return tokens, labels, loss_mask, attention_mask, position_ids
 
@@ -185,7 +222,7 @@ def loss_func(loss_mask, moe_loss, mos_loss, output_tensor):
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
-    
+
     # Reduce loss for logging.
     averaged_loss = average_losses_across_data_parallel_group([loss])
     if args.mos or args.kd:
@@ -208,7 +245,7 @@ def calculate_mos_loss(args, stu_output, teacher_model, tokens, position_ids, at
     alpha = args.kd_alpha_ce
     beta = args.kd_beta_ce
     kd_temp = args.kd_temp
-    
+
     if teacher_model:
         with torch.no_grad():
             if args.curriculum_learning_legacy and args.curriculum_seqlen < args.seq_length:
@@ -218,7 +255,7 @@ def calculate_mos_loss(args, stu_output, teacher_model, tokens, position_ids, at
                 position_ids = position_ids[:, :curriculum_seqlen].contiguous()
                 attention_mask = attention_mask[:, :, :curriculum_seqlen, :curriculum_seqlen].contiguous()
                 # No need to truncate labels as we do not need it for the teacher logits
-            tea_output, *tea_other_losses = teacher_model(tokens, position_ids, attention_mask)
+            tea_output, tea_other_losses = teacher_model(tokens, position_ids, attention_mask)
             assert stu_output.size() == tea_output.size(), 'teacher and student output should match in size. Student: {}, Teacher: {}, CL seq length {}'.format(stu_output.size(), tea_output.size(), args.curriculum_seqlen)
 
         student_logits = F.log_softmax(stu_output / kd_temp, dim=2)
@@ -248,13 +285,13 @@ def forward_step(data_iterator, model):
 
     if args.mos or args.kd:
         # The forward func can return either the loss or the logits, depending on whether passing in the labels or not.
-        stu_output, *other_losses = model(tokens, position_ids, attention_mask)
+        stu_output, other_losses = model(tokens, position_ids, attention_mask)
         if args.curriculum_learning_legacy and args.curriculum_seqlen < args.seq_length:
             assert args.curriculum_seqlen is not None
             labels = labels[:, :args.curriculum_seqlen].contiguous()
         output_tensor = tensor_parallel.vocab_parallel_cross_entropy(stu_output.contiguous().float(), labels)
     else:
-        output_tensor, *other_losses = model(tokens, position_ids, attention_mask,
+        output_tensor, other_losses = model(tokens, position_ids, attention_mask,
                                             labels=labels)
     if args.curriculum_learning_legacy and args.curriculum_seqlen < args.seq_length:
         loss_mask = loss_mask[:, :args.curriculum_seqlen].contiguous()
@@ -271,7 +308,7 @@ def forward_step(data_iterator, model):
         if args.teacher_forward and args.teacher_model is not None:
             mos_loss = calculate_mos_loss(args, stu_output,
                 args.teacher_model[0], tokens, position_ids, attention_mask)
-    
+
     # Output_tensor stores the standard loss, loos_func calculates the total loss.
     return output_tensor, partial(loss_func, loss_mask, moe_loss, mos_loss)
 

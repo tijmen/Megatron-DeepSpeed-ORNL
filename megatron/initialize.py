@@ -1,3 +1,4 @@
+# Copyright (C) 2024 Habana Labs, Ltd. an Intel Company.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Megatron initialization."""
@@ -15,6 +16,8 @@ from megatron import get_adlr_autoresume
 from megatron import get_args
 from megatron import get_tensorboard_writer
 from megatron.core import mpu, tensor_parallel
+from megatron.core.pipeline_parallel.deepspeed_zbh1_engine import _exec_backward_only_pass, _exec_weight_pass
+from megatron.core.pipeline_parallel.deepspeed_zbh1_schedule import BackwardOnlyPass, WeightPass, ZeroBubbleH1Pipeline
 from megatron.arguments import (parse_args, validate_args)
 from megatron.checkpointing import load_args_from_checkpoint
 from megatron.global_vars import set_global_variables
@@ -23,11 +26,14 @@ from megatron.model.fused_bias_gelu import bias_gelu
 from megatron.utils import is_rank_0
 from deepspeed.accelerator import get_accelerator
 import deepspeed
+from deepspeed.ops.op_builder.builder import OpBuilder
+
+is_rocm_pytorch = OpBuilder.is_rocm_pytorch()
 
 from mpi4py import MPI
 
 def initialize_megatron(extra_args_provider=None, args_defaults={},
-                        ignore_unknown_args=False, allow_no_cuda=False):
+                        ignore_unknown_args=False, allow_no_cuda=False, external_args={}):
     """Set global variables, initialize distributed, and
     set autoresume and random seeds.
     `allow_no_cuda` should not be set unless using megatron for cpu only 
@@ -43,12 +49,16 @@ def initialize_megatron(extra_args_provider=None, args_defaults={},
     # Parse arguments
     args = parse_args(extra_args_provider, ignore_unknown_args)
 
+    for key in external_args:
+        if key in args:
+            setattr(args, key, external_args[key])
+
     if args.use_checkpoint_args or args_defaults.get('use_checkpoint_args', False):
         assert args.load is not None, '--use-checkpoints-args requires --load argument'
         load_args_from_checkpoint(args)
 
     validate_args(args, args_defaults)
-        
+
     # set global args, build tokenizer, and set adlr-autoresume,
     # tensorboard-writer, and timers.
     set_global_variables(args)
@@ -111,6 +121,9 @@ def _compile_dependencies():
     if not get_accelerator().device_name() == 'cuda':
         print(">fused kernel is only supported in cuda, skip loading fused kernel")
         return 
+
+    if args.use_dataset_only:
+        return
     # ==================
     # Load fused kernels
     # ==================
@@ -173,6 +186,7 @@ def setup_deepspeed_random_and_activation_checkpointing(args):
 
     deepspeed.checkpointing.configure(
         mpu,
+        deepspeed_config=args.deepspeed_config,
         partition_activations=args.partition_activations,
         contiguous_checkpointing=args.contigious_checkpointing,
         num_checkpoints=num_layers,
@@ -228,21 +242,22 @@ def _initialize_distributed():
 
             get_accelerator().set_device(device) # only do so when device_count > 0
     print("args values:", args)
+    if args.enable_zbh1_pipeline:
+        deepspeed.runtime.pipe.schedule.TrainSchedule = ZeroBubbleH1Pipeline
+        deepspeed.runtime.pipe.engine.PipelineEngine._INSTRUCTION_MAP.update(
+            {
+                BackwardOnlyPass: _exec_backward_only_pass,
+                WeightPass: _exec_weight_pass,
+            }
+        )
     # Call the init process
     if args.deepspeed or args.ds_inference:
         deepspeed.init_distributed()
     else:
-        print("before init_process_group:" )
-        '''
         torch.distributed.init_process_group(
-            backend=args.distributed_backend,
-            world_size=args.world_size, rank=args.rank,
-            timeout=timedelta(minutes=args.distributed_timeout_minutes))
-        '''
-        torch.distributed.init_process_group(
-            backend=args.distributed_backend,
+            backend=get_accelerator().communication_backend_name(),
             world_size=args.world_size,
-            timeout=timedelta(minutes=10))
+            timeout=timedelta(minutes=args.distributed_timeout_minutes))
 
     # Set the tensor model-parallel, pipeline model-parallel, and
     # data-parallel communicators.
@@ -250,8 +265,16 @@ def _initialize_distributed():
         if mpu.model_parallel_is_initialized():
             print('model parallel is already initialized')
         else:
+            if args.ds_sequence_parallel_size > 1 and args.sequence_parallel:
+                raise RuntimeError(
+                    f"sequence_parallel_size > 1 enables DeepSpeed's sequence parallel, "
+                    f"which is not compatible with Megatron-LM's sequence parallel. "
+                    f"Remove --sequence_parallel to use DeepSpeed's sequence parallel."
+                )
+
             mpu.initialize_model_parallel(args.tensor_model_parallel_size,
                                            args.pipeline_model_parallel_size,
+                                           args.ds_sequence_parallel_size,
                                            args.virtual_pipeline_model_parallel_size,
                                            args.pipeline_model_parallel_split_rank,
                                            use_distributed_optimizer=args.use_distributed_optimizer)
@@ -318,7 +341,7 @@ def set_jit_fusion_options():
     # flags required to enable jit fusion kernels
     TORCH_MAJOR = int(torch.__version__.split('.')[0])
     TORCH_MINOR = int(torch.__version__.split('.')[1])
-    if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
+    if ((TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)) and not is_rocm_pytorch:
         # nvfuser
         torch._C._jit_set_profiling_executor(True)
         torch._C._jit_set_profiling_mode(True)
@@ -348,9 +371,12 @@ def _warmup_jit_function():
         dtype = torch.float32
 
     # Warmup fused bias+gelu
+    seq_length = args.seq_length
+    if args.ds_sequence_parallel_fpdt: # when using FPDT on extremly long sequence, we use the chunk length in FPDT to warmup instead of the ordinary SP sequence length which will cause OOM.
+        seq_length = args.ds_sequence_parallel_fpdt_chunk_size
     bias = torch.rand(args.ffn_hidden_size // args.tensor_model_parallel_size,
                       dtype=dtype, device='cuda')
-    input = torch.rand((args.seq_length, args.micro_batch_size,
+    input = torch.rand((seq_length // args.ds_sequence_parallel_size, args.micro_batch_size,
                         args.ffn_hidden_size // args.tensor_model_parallel_size),
                        dtype=dtype, device='cuda')
     # Warmup JIT fusions with the input grad_enable state of both forward
@@ -363,12 +389,11 @@ def _warmup_jit_function():
 
     # Warmup fused bias+dropout+add
     if args.sequence_parallel:
-        seq_length = args.seq_length // mpu.get_tensor_model_parallel_world_size()
-    else:
-        seq_length = args.seq_length
-    input = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),
+        seq_length = seq_length // mpu.get_tensor_model_parallel_world_size()
+        
+    input = torch.rand((seq_length // args.ds_sequence_parallel_size, args.micro_batch_size, args.hidden_size),
                        dtype=dtype, device='cuda')
-    residual = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),
+    residual = torch.rand((seq_length // args.ds_sequence_parallel_size, args.micro_batch_size, args.hidden_size),
                           dtype=dtype, device='cuda')
     bias = torch.rand((args.hidden_size), dtype=dtype, device='cuda').expand_as(residual)
     dropout_rate = 0.1

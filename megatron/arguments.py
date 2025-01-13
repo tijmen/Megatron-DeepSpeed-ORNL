@@ -1,3 +1,4 @@
+# Copyright (C) 2024 Habana Labs, Ltd. an Intel Company.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Megatron arguments."""
@@ -9,6 +10,7 @@ import os
 import torch
 import deepspeed
 import types
+from packaging import version
 
 import torch.nn.functional as F
 from megatron.global_vars import set_retro_args, get_retro_args
@@ -45,6 +47,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_inference_args(parser)
     parser = _add_transformer_engine_args(parser)
     parser = _add_retro_args(parser)
+    parser = _add_profiler_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
@@ -76,6 +79,12 @@ def validate_args(args, defaults={}):
     assert args.world_size % args.tensor_model_parallel_size == 0, 'world size'\
         ' ({}) is not divisible by tensor model parallel size ({})'.format(
             args.world_size, args.tensor_model_parallel_size)
+    # Zero bubble pipeline is defined on deepspeed's scheduler
+    if args.enable_zbh1_pipeline:
+        assert args.deepspeed, 'Use DeepSpeed to use zero-bubble H1 pipeline'
+        assert args.sequence_parallel == False, "Sequence Parallel not tested, proceed at own will by removing this line"
+    if args.enable_zbh1_exact_semantics:
+        assert args.enable_zbh1_pipeline, 'Exact semantics require ZBH1 pipeline enabled'
     # Pipeline model parallel size.
     args.pipeline_model_parallel_size = min(
         args.pipeline_model_parallel_size,
@@ -89,18 +98,25 @@ def validate_args(args, defaults={}):
     if args.no_pipeline_parallel:
         assert args.pipeline_model_parallel_size == 1, \
             "pipeline_model_parallel_size must be 1 if pipeline parallel is disabled"
+        
+    if args.ds_sequence_parallel_size > 1:
+        assert version.parse(deepspeed.__version__) >= version.parse("0.10.2"), "sequence parallelism requires DeepSpeed version 0.10.2+"
+
     model_parallel_size = args.pipeline_model_parallel_size * \
-                          args.tensor_model_parallel_size
-    assert args.world_size % model_parallel_size == 0, 'world size is not'\
+                          args.tensor_model_parallel_size * \
+                          args.ds_sequence_parallel_size
+    assert args.world_size % model_parallel_size == 0, 'world size ({}) is not'\
         ' divisible by tensor parallel size ({}) times pipeline parallel ' \
-        'size ({})'.format(args.world_size, args.tensor_model_parallel_size,
-                           args.pipeline_model_parallel_size)
+        'size ({}) times seqence parallel size ({})'.format(args.world_size, args.tensor_model_parallel_size,
+                           args.pipeline_model_parallel_size, args.ds_sequence_parallel_size)
     args.data_parallel_size = args.world_size // model_parallel_size
     if args.rank == 0:
         print('using world size: {}, data-parallel-size: {}, '
+              'sequence-parallel size: {}, '
               'tensor-model-parallel size: {}, '
               'pipeline-model-parallel size: {} '.format(
                   args.world_size, args.data_parallel_size,
+                  args.ds_sequence_parallel_size,
                   args.tensor_model_parallel_size,
                   args.pipeline_model_parallel_size), flush=True)
     if args.pipeline_model_parallel_size > 1:
@@ -258,31 +274,34 @@ def validate_args(args, defaults={}):
             'cannot have both num-layers and encoder-num-layers specified'
         args.encoder_num_layers = args.num_layers
     else:
-        assert args.encoder_num_layers is not None, \
-            'either num-layers or encoder-num-layers should be specified'
-        args.num_layers = args.encoder_num_layers
+        if not args.use_dataset_only:
+            assert args.encoder_num_layers is not None, \
+                'either num-layers or encoder-num-layers should be specified'
+            args.num_layers = args.encoder_num_layers
 
     # Check required arguments.
-    required_args = ['num_layers', 'hidden_size', 'num_attention_heads',
-                     'max_position_embeddings']
-    for req_arg in required_args:
-        _check_arg_is_not_none(args, req_arg)
+    if not args.use_dataset_only:
+        required_args = ['num_layers', 'hidden_size', 'num_attention_heads',
+                         'max_position_embeddings']
+        for req_arg in required_args:
+            _check_arg_is_not_none(args, req_arg)
 
     # Checks.
-    if args.ffn_hidden_size is None:
-        args.ffn_hidden_size = 4 * args.hidden_size
+    if not args.use_dataset_only:
+        if args.ffn_hidden_size is None:
+            if args.swiglu:
+                # reduce the dimnesion for MLP since projections happens on
+                # two linear layers. this keeps the number of paramters in
+                # the same ballpark as the counterpart with 4*h size
+                # we keep it a multiple of 64, which means the actual tensor size
+                # will be a multiple of 64 / tp_size
+                args.ffn_hidden_size = int((4 * args.hidden_size * 2 / 3) / 64) * 64
+            else:
+                args.ffn_hidden_size = 4 * args.hidden_size
 
-    if args.swiglu:
-        # reduce the dimnesion for MLP since projections happens on
-        # two linear layers. this keeps the number of paramters in
-        # the same ballpark as the counterpart with 4*h size
-        # we keep it a multiple of 64, which means the actual tensor size
-        # will be a multiple of 64 / tp_size
-        args.ffn_hidden_size = int((4 * args.hidden_size * 2 / 3) / 64) * 64
-
-    if args.kv_channels is None:
-        assert args.hidden_size % args.num_attention_heads == 0
-        args.kv_channels = args.hidden_size // args.num_attention_heads
+        if args.kv_channels is None:
+            assert args.hidden_size % args.num_attention_heads == 0
+            args.kv_channels = args.hidden_size // args.num_attention_heads
 
     if args.seq_length is not None:
         assert args.encoder_seq_length is None
@@ -291,10 +310,15 @@ def validate_args(args, defaults={}):
         assert args.encoder_seq_length is not None
         args.seq_length = args.encoder_seq_length
 
-    if args.seq_length is not None:
-        assert args.max_position_embeddings >= args.seq_length
-    if args.decoder_seq_length is not None:
-        assert args.max_position_embeddings >= args.decoder_seq_length
+    if not args.use_dataset_only:
+        if args.seq_length is not None:
+            assert args.max_position_embeddings >= args.seq_length
+        if args.decoder_seq_length is not None:
+            assert args.max_position_embeddings >= args.decoder_seq_length
+    # When rotary position embeddings is used, set add_position_embedding
+    # to false to turn off absolute position embedding.
+    if args.use_rotary_position_embeddings:
+        args.add_position_embedding = False
     if args.lr is not None:
         assert args.min_lr <= args.lr
     if args.save is not None:
@@ -306,14 +330,15 @@ def validate_args(args, defaults={}):
         assert args.fp16 or args.bf16, \
             'residual connection in fp32 only supported when using fp16 or bf16.'
 
-    if args.weight_decay_incr_style == 'constant':
-        assert args.start_weight_decay is None
-        assert args.end_weight_decay is None
-        args.start_weight_decay = args.weight_decay
-        args.end_weight_decay = args.weight_decay
-    else:
-        assert args.start_weight_decay is not None
-        assert args.end_weight_decay is not None
+    if not args.use_dataset_only:
+        if args.weight_decay_incr_style == 'constant':
+            assert args.start_weight_decay is None
+            assert args.end_weight_decay is None
+            args.start_weight_decay = args.weight_decay
+            args.end_weight_decay = args.weight_decay
+        else:
+            assert args.start_weight_decay is not None
+            assert args.end_weight_decay is not None
 
     TORCH_MAJOR = int(torch.__version__.split('.')[0])
     TORCH_MINOR = int(torch.__version__.split('.')[1])
@@ -377,15 +402,17 @@ def validate_args(args, defaults={}):
     if args.deepspeed:
         args.async_tensor_model_parallel_allreduce = False
 
-    if os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS') != "1":
-        if args.sequence_parallel:
-            raise RuntimeError(
-                "Using sequence parallelism requires setting the environment variable "
-                "CUDA_DEVICE_MAX_CONNECTIONS to 1")
-        if args.async_tensor_model_parallel_allreduce:
-            raise RuntimeError(
-                "Using async gradient all reduce requires setting the environment "
-                "variable CUDA_DEVICE_MAX_CONNECTIONS to 1")
+    if not args.use_dataset_only:
+        if deepspeed.accelerator.get_accelerator().device_name() == "cuda" \
+            and os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS') != "1":
+            if args.sequence_parallel:
+                raise RuntimeError(
+                    "Using sequence parallelism requires setting the environment variable "
+                    "CUDA_DEVICE_MAX_CONNECTIONS to 1")
+            if args.async_tensor_model_parallel_allreduce:
+                raise RuntimeError(
+                    "Using async gradient all reduce requires setting the environment "
+                    "variable CUDA_DEVICE_MAX_CONNECTIONS to 1")
 
     # Disable bias gelu fusion if we are disabling bias altogether
     if not args.add_bias_linear:
@@ -406,12 +433,27 @@ def validate_args(args, defaults={}):
     args.curriculum_learning_legacy = False
     args.compression_training = False
 
+    # FlashAttention
+    args.use_flash_attn = args.use_flash_attn_v1 or args.use_flash_attn_triton or args.use_flash_attn_v2 or args.use_flash_attn_builder
+
     # AML
     if args.aml_data_download_path is not None:
         data_paths = []
         for path in args.data_path:
             data_paths.append(f"{args.aml_data_download_path}/{path}")
         args.data_path = data_paths
+
+    # GQA
+    if not args.use_dataset_only:
+        if args.num_key_value_heads is None:
+            args.num_key_value_heads = args.num_attention_heads
+        assert args.num_attention_heads % args.num_key_value_heads == 0, \
+            f"num_attention_heads must be divisible by num_key_value_heads (got `num_attention_heads`: {args.num_attention_heads} " \
+            f"and `num_key_value_heads`: {args.num_key_value_heads})."
+        if args.num_key_value_heads != args.num_attention_heads:
+            # if GQA
+            assert not args.mos, 'GQA currently does not support args.mos'
+            assert not args.kd, 'GQA currently does not support args.kd'
 
     # Print arguments.
     _print_args("arguments", args)
@@ -582,6 +624,8 @@ def _add_network_size_args(parser):
                        'This is set to 4*hidden-size if not provided')
     group.add_argument('--num-attention-heads', type=int, default=None,
                        help='Number of transformer attention heads.')
+    group.add_argument('--num-key-value-heads', type=int, default=None,
+                       help='Number of key_value heads that should be used to implement Grouped Query Attention.')
     group.add_argument('--kv-channels', type=int, default=None,
                        help='Projection weights dimension in multi-head '
                        'attention. This is set to '
@@ -592,6 +636,9 @@ def _add_network_size_args(parser):
                        'This is the size of position embedding.')
     group.add_argument('--use-rotary-position-embeddings', action='store_true',
                        help='Use rotary positional embeddings or not')
+    group.add_argument('--rotary-position-embeddings-theta', type=int, default=10000,
+                       help='Rotary positional embeddings theta value.',
+                       dest='rope_theta')
     group.add_argument('--rotary-percent', type=float, default=1.0,
                        help='Percent of rotary dimension to use, default 100%')
     group.add_argument('--no-position-embedding',
@@ -601,11 +648,19 @@ def _add_network_size_args(parser):
     group.add_argument('--make-vocab-size-divisible-by', type=int, default=128,
                        help='Pad the vocab size to be divisible by this value.'
                        'This is added for computational efficieny reasons.')
+    group.add_argument('--normalization', type=str, default='layernorm',
+                       choices=['layernorm', 'rmsnorm'],
+                       help='Options for layer normalization type:'
+                            '  layernorm'
+                            '  rmsnorm')
     group.add_argument('--layernorm-epsilon', type=float, default=1e-5,
                        help='Layer norm epsilon.')
     group.add_argument('--apply-layernorm-1p', action='store_true',
                        help='Adjust LayerNorm weights such that they are centered '
                        'around zero. This improves numerical stability.')
+    group.add_argument('--disable-mem-efficient-ln', action='store_false', 
+                       help='Disable the memory-efficient fused LayerNorm optimization '
+                       'introduced in https://github.com/NVIDIA/apex/pull/1715', dest='mem_efficient_ln')
     group.add_argument('--apply-residual-connection-post-layernorm',
                        action='store_true',
                        help='If set, use original BERT residula connection '
@@ -630,6 +685,9 @@ def _add_network_size_args(parser):
                        help='Untie embeddings and output weights.'),
     group.add_argument('--embedding-weights-in-fp32', action='store_true',
                        help='Cast word embedding weights to fp32 before embedding fwd.'),
+    group.add_argument('--kill-switch-file', type=str, default=None,
+                       help='Location of kill switch file. '
+                            'If found will automatically exit the program at runtime.')
     group.add_argument('--master-addr', type=str, help='Master address provided as input')
 
     return parser
@@ -700,6 +758,12 @@ def _add_logging_args(parser):
     group.add_argument('--log-world-size-to-tensorboard',
                        action='store_true',
                        help='Enable world size logging to tensorboard.')
+    group.add_argument('--wandb-project', type=str, default='',
+                       help='The wandb project name. Ignore wandb by default.')
+    group.add_argument('--wandb-exp-name', type=str, default='',
+                       help='The wandb experiment name.')
+    group.add_argument('--wandb-save-dir', type=str, default='',
+                       help='Path to save the wandb results locally.')
 
     return parser
 
@@ -795,6 +859,10 @@ def _add_training_args(parser):
                        'uniformly divided recompute unit, '
                        '2) block: the number of individual Transformer layers '
                        'to recompute within each pipeline stage.')
+    group.add_argument('--enable-zbh1-pipeline', action='store_true',
+                       help='Activate zero bubble pipeline parallelism schedule method')
+    group.add_argument('--enable-zbh1-exact-semantics', action='store_true',
+                       help='Use an exact semantics for zbh1 schedule, might be slower than the default.')
 
     # deprecated
     # HACK: added back arguments because DeepSpeed still relies on the old
@@ -859,9 +927,19 @@ def _add_training_args(parser):
     group.add_argument('--create-moe-param-group', action='store_true',
                        help='Create separate groups for MoE params.'
                        'This is necessary for techniques like ZeRO.')
-    group.add_argument('--use-flash-attn', action='store_true',
-                       help='use FlashAttention implementation of attention. '
+    group.add_argument('--disable-moe-top2-2nd-expert-sampling', action='store_false',
+                       help='Disable MoE top2 sampling of the 2nd expert. Instead of sampling, use argmax.',
+                       dest='moe_top2_2nd_expert_sampling')
+    group.add_argument('--use-flash-attn', '--use-flash-attn-v1', dest='use_flash_attn_v1', action='store_true',
+                       help='use first version FlashAttention implementation of attention. '
                        'https://arxiv.org/abs/2205.14135')
+    group.add_argument('--use-flash-attn-v2', action='store_true',
+                       help='use second version FlashAttention implementation of attention. '
+                       'https://arxiv.org/abs/2307.08691')
+    group.add_argument('--use-flash-attn-triton', action='store_true',
+                       help='use FlashAttention implementation of attention using Triton.')
+    group.add_argument('--use-flash-attn-builder', action='store_true',
+                       help='use FlashAttention op builder.')
     group.add_argument('--disable-bias-linear', action='store_false',
                        help='Disable bias in the linear layers',
                        dest='add_bias_linear')
@@ -877,6 +955,8 @@ def _add_training_args(parser):
                        help='Run optimizer on CPU')
     group.add_argument('--cpu_torch_adam', action='store_true',
                        help='Use Torch Adam as optimizer on CPU.')
+    group.add_argument('--ds_fused_adam', action='store_true',
+                       help='Use DeepSpeed FusedAdam as optimizer.')
     group.add_argument('--no-pipeline-parallel', action='store_true',
                        help='Disable pipeline parallelism')
     group.add_argument('--use-tutel', action='store_true',
@@ -896,12 +976,26 @@ def _add_training_args(parser):
                        'check persist_ln_hidden_sizes if your hidden '
                        'size is supported.')
     group.add_argument('--sequence-parallel', action='store_true',
-                       help='Enable sequence parallel optimization.')
+                       help='Enable Megatron-LM\'s sequence parallel optimization.')
+    group.add_argument('--ds-sequence-parallel-size', type=int, default=1,
+                       help='Enable DeepSpeed\'s sequence parallel. Cannot be combined with "--sequence-parallel", which enables Megatron-LM\'s sequence parallel.')
+    group.add_argument('--force-ds-sequence-parallel', action='store_true',
+                       help='use DeepSpeed sequence parallelism regardless of sequence parallel size.')
+    
+    group.add_argument('--ds-sequence-parallel-fpdt', action='store_true',
+                       help='use DeepSpeed sequence parallelism with FPDT.')
+    group.add_argument('--ds-sequence-parallel-fpdt-chunk-size', type=int, default=65536,
+                       help='Chunk size used in FPDT attention.')
+    group.add_argument('--ds-sequence-parallel-fpdt-offloading', action='store_true',
+                       help='use DeepSpeed sequence parallelism FPDT with offloading.')
+
     group.add_argument('--no-gradient-accumulation-fusion',
                        action='store_false',
                        help='Disable fusing gradient accumulation to weight '
                        'gradient computation of linear layers',
                        dest='gradient_accumulation_fusion')
+    group.add_argument('--use-dataset-only', type=bool, required=False, default=False,
+                       help='If set to True, only use the megatron dataset for external trainer ')
     return parser
 
 
@@ -988,6 +1082,8 @@ def _add_checkpointing_args(parser):
                        help='Do not save current rng state.')
     group.add_argument('--load', type=str, default=None,
                        help='Directory containing a model checkpoint.')
+    group.add_argument('--load-tag', type=str, default=None,
+                       help='Specific checkpoint tag to load. Ignores latest.')
     group.add_argument('--no-load-optim', action='store_true', default=None,
                        help='Do not load optimizer when loading checkpoint.')
     group.add_argument('--no-load-rng', action='store_true', default=None,
@@ -1010,7 +1106,8 @@ def _add_checkpointing_args(parser):
                        help="If '--load' is set, but checkpoint is not found "
                        "(e.g., path typo), then exit instead of random "
                        "initialization.")
-
+    group.add_argument('--universal-checkpoint', action='store_true',
+                        help='Loading a universal format checkpoint.')
     return parser
 
 
@@ -1077,7 +1174,7 @@ def _add_distributed_args(parser):
                        help='overlap pipeline parallel communication with forward and backward chunks',
                        dest='overlap_p2p_comm')
     group.add_argument('--distributed-backend', default='nccl',
-                       choices=['nccl', 'gloo', 'ccl'],
+                       choices=['nccl', 'gloo', 'ccl', 'hccl'],
                        help='Which backend to use for distributed training.')
     group.add_argument('--distributed-timeout-minutes', type=int, default=10,
                        help='Timeout minutes for torch.distributed.')
@@ -1096,7 +1193,7 @@ def _add_distributed_args(parser):
                        default=False, help='If set, use custom-built ring exchange '
                        'for p2p communications. Note that this option will require '
                        'a custom built image that support ring-exchange p2p.')
-    group.add_argument('--local_rank', type=int, default=None,
+    group.add_argument('--local-rank', '--local_rank', type=int, default=None,
                        help='local rank passed from distributed launcher.')
     group.add_argument('--lazy-mpu-init', type=bool, required=False,
                        help='If set to True, initialize_megatron() '
@@ -1212,10 +1309,13 @@ def _add_data_args(parser):
                                 'GPT2BPETokenizer',
                                 'SentencePieceTokenizer',
                                 'GPTSentencePieceTokenizer',
+                                'HFTokenizer',
                                 'NullTokenizer'],
                        help='What type of tokenizer to use.')
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')
+    group.add_argument('--trust-remote-code', action='store_true', default=False,
+                       help='To run HFTokenizer model from local path.')
     group.add_argument('--data-impl', type=str, default='infer',
                        choices=['mmap', 'infer'],
                        help='Implementation of indexed datasets.')
@@ -1243,6 +1343,8 @@ def _add_data_args(parser):
                        help='Force to use certain index file.')
     group.add_argument('--train-shuffle-idx-path', type=str, default=None,
                        help='Force to use certain index file.')
+    group.add_argument('--repeated-dataloader', action='store_true',
+                       help='Once all the data has been loaded, reuse the DataLoader.')
     return parser
 
 
@@ -1465,5 +1567,28 @@ def _add_distillation_args(parser):
     
     group.add_argument('--load-teacher', type=str, default=None,
                        help='Directory containing a teacher model checkpoint.')
+
+    return parser
+
+
+def _add_profiler_args(parser):
+    group = parser.add_argument_group(title='profiling configuration')
+
+    group.add_argument("--profile",
+     type=str,
+     default=None,
+     choices=['pt', 'pt-full'],
+     help="Enable profiling, pt-full gives call stack compared to pt")
+
+    group.add_argument("--profile_steps",
+     type=str,
+     default='2,3',
+     help="Which steps to profile. Format: <start step>,<end step>")
+    
+    group.add_argument("--profile-ranks",
+     type=int,
+     nargs='+',
+     default=None,
+     help="Which ranks to profile. Format: 0 1 2 3")
 
     return parser

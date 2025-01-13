@@ -26,6 +26,8 @@ from .utils import (
 
 from megatron.core.utils import safely_set_viewless_tensor_data
 
+import deepspeed
+
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
 
@@ -168,9 +170,11 @@ class CudaRNGStatesTracker:
 # RNG tracker object.
 _CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
 
-
 def get_cuda_rng_tracker():
     """Get cuda rng tracker."""
+    if deepspeed.checkpointing.is_configured():
+        return deepspeed.checkpointing.get_cuda_rng_tracker()
+    
     return _CUDA_RNG_STATE_TRACKER
 
 
@@ -191,6 +195,9 @@ def model_parallel_cuda_manual_seed(seed):
                               groups. This is used for example for dropout in
                               model parallel regions.
     """
+    if deepspeed.checkpointing.is_configured():
+        return deepspeed.checkpointing.model_parallel_cuda_manual_seed(seed)
+    
     # 2718 is just for fun and any POSITIVE value will work.
     offset = seed + 2718
     tensor_model_parallel_seed = offset + get_tensor_model_parallel_rank()
@@ -210,6 +217,15 @@ def model_parallel_cuda_manual_seed(seed):
     # and model parallel state.
     _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME,
                                 tensor_model_parallel_seed)
+
+
+def model_parallel_reconfigure_tp_seed(seed):
+    if deepspeed.checkpointing.is_configured():
+        return deepspeed.checkpointing.model_parallel_reconfigure_tp_seed(seed)
+
+    model_parallel_seed = seed + 2718 + get_tensor_model_parallel_rank()
+    with _CUDA_RNG_STATE_TRACKER.fork():
+        get_accelerator().manual_seed(model_parallel_seed)
 
 
 class CheckpointFunction(torch.autograd.Function):
@@ -241,6 +257,9 @@ class CheckpointFunction(torch.autograd.Function):
                 args[0],
                 split_tensor_into_1d_equal_chunks(args[0].data, new_buffer=True))
 
+        # HACK: currently when DeepSpeed is used, we always set
+        # distribute_saved_activations to false, and use the following older
+        # activation checkpointing mechanisms
         if _CHECKPOINTED_ACTIVATIONS_MEMORY_BUFFER is not None:
             ctx.input_0_shape = args[0].data.shape
             args[0].data = split_tensor_into_1d_equal_chunks(args[0].data)
@@ -262,6 +281,9 @@ class CheckpointFunction(torch.autograd.Function):
             safely_set_viewless_tensor_data(
                 inputs[0],
                 gather_split_1d_tensor(inputs[0].data).view(ctx.input_0_shape))
+        # HACK: currently when DeepSpeed is used, we always set
+        # distribute_saved_activations to false, and use the following older
+        # activation checkpointing mechanisms
         if _CHECKPOINTED_ACTIVATIONS_MEMORY_BUFFER is not None:
             inputs[0].data = gather_split_1d_tensor(inputs[0].data)
             inputs[0].data = inputs[0].data.view(ctx.input_0_shape)
@@ -301,5 +323,8 @@ class CheckpointFunction(torch.autograd.Function):
 def checkpoint(function, distribute_saved_activations, *args):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
+    if deepspeed.checkpointing.is_configured():
+        return deepspeed.checkpointing.checkpoint(function, *args)
+    
     return CheckpointFunction.apply(function,
                                     distribute_saved_activations, *args)

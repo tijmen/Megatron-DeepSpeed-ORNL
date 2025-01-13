@@ -55,13 +55,13 @@ def get_param_groups(modules,
 
     param_groups = []
     if len(wd_no_scale_lr):
-        param_groups.append({'params': wd_no_scale_lr, 'wd_mult': 1.0, 'lr_mult': 1.0})
+        param_groups.append({'name': 'wd_no_scale_lr', 'params': wd_no_scale_lr, 'wd_mult': 1.0, 'lr_mult': 1.0})
     if len(wd_scale_lr):
-        param_groups.append({'params': wd_scale_lr, 'wd_mult': 1.0, 'lr_mult': lr_mult})
+        param_groups.append({'name': 'wd_scale_lr', 'params': wd_scale_lr, 'wd_mult': 1.0, 'lr_mult': lr_mult})
     if len(no_wd_no_scale_lr):
-        param_groups.append({'params': no_wd_no_scale_lr, 'wd_mult': 0.0, 'lr_mult': 1.0})
+        param_groups.append({'name': 'no_wd_no_scale_lr', 'params': no_wd_no_scale_lr, 'wd_mult': 0.0, 'lr_mult': 1.0})
     if len(no_wd_scale_lr):
-        param_groups.append({'params': no_wd_scale_lr, 'wd_mult': 0.0, 'lr_mult': lr_mult})
+        param_groups.append({'name': 'no_wd_scale_lr', 'params': no_wd_scale_lr, 'wd_mult': 0.0, 'lr_mult': lr_mult})
 
     return param_groups
 
@@ -94,6 +94,10 @@ def get_megatron_optimizer(model,
                                        eps=args.adam_eps)
     else:
         if args.optimizer == 'adam':
+            if args.ds_fused_adam:
+                global Adam
+                from deepspeed.ops.adam import FusedAdam
+                Adam = FusedAdam
             optimizer = Adam(param_groups,
                             lr=args.lr,
                             weight_decay=args.weight_decay,
@@ -113,7 +117,7 @@ def get_megatron_optimizer(model,
 
     # Determine whether the params have main-grad field.
     params_have_main_grad = False
-    if args.DDP_impl == 'local':
+    if args.use_contiguous_buffers_in_local_ddp:
         params_have_main_grad = True
 
     # Mixed precision optimizer.
