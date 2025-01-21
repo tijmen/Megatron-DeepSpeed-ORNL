@@ -549,7 +549,8 @@ class _HFTokenizer(AbstractTokenizer):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path,
                                                        padding_side="right",
                                                        trust_remote_code=trust_remote_code,
-                                                       use_fast=False)
+                                                       use_fast=False,
+                                                       model_max_length=max_seq_len)
         
         DEFAULT_PAD_TOKEN = "[PAD]"
         DEFAULT_EOS_TOKEN = "</s>"
@@ -584,7 +585,17 @@ class _HFTokenizer(AbstractTokenizer):
         return self.decoder
 
     def tokenize(self, text):
-        return self.tokenizer.encode(text)
+        """Convert text to a list of ids."""
+        # Ensure model_max_length is set to avoid NoneType comparison errors
+        if self.tokenizer.model_max_length is None:
+            # Set a reasonable default if none was provided
+            self.tokenizer.model_max_length = 128000
+        
+        return self.tokenizer.encode(
+            text,
+            truncation=True,
+            max_length=self.tokenizer.model_max_length
+        )
 
     def detokenize(self, token_ids):
         return self.tokenizer.decode(token_ids)

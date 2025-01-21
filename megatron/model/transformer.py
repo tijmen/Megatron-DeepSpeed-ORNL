@@ -24,7 +24,7 @@ from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
 import deepspeed
 from deepspeed.moe.layer import MoE
 from deepspeed.accelerator import get_accelerator
-from deepspeed.sequence.fpdt_layer import FPDT_FFN, FPDT_Attention
+#from deepspeed.sequence.fpdt_layer import FPDT_FFN, FPDT_Attention # TdH 20250120 commented this out to work for newer deepspeed
 
 try:
     from deepspeed.sequence.layer import DistributedAttention
@@ -1648,6 +1648,16 @@ def _get_layer_type(model_type, default_layer_type, retro_layer_numbers,
 
 
 def get_num_experts_per_layer(num_experts: list, num_layers: int, expert_interval: int, offset: int = 0) -> list:
+    # HACK by TdH 2025-01-20: fix this
+    # the idea is that I am NOT using MoE, so we can just return a list of 1s
+    return [1]*num_layers
+
+    print("TdH <debug>:")
+    print("num_experts:", num_experts)
+    print("num_layers:", num_layers)
+    print("expert_interval:", expert_interval)
+    print("offset:", offset)
+    print("</debug>")
     assert len(num_experts) == 1 or len(num_experts) == num_layers // expert_interval, \
         'num_experts must be either a single value or a list of the same length as the number of MoE layers'
     if len(num_experts) == 1:

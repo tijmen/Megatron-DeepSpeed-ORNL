@@ -1266,7 +1266,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         while iteration < args.train_iters and (args.train_tokens is None or \
             args.consumed_train_tokens < args.train_tokens):
             trigger(on_step_begin)
-        update_num_microbatches(args.consumed_train_samples)
+            update_num_microbatches(args.consumed_train_samples)
             if args.deepspeed:
                 # inform deepspeed of any batch size changes
                 global_batch_size = mpu.get_data_parallel_world_size() * \
@@ -1280,8 +1280,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                 if iteration == 0 or curriculum_seqlen != args.curriculum_seqlen:
                     if args.use_rotary_position_embeddings:
                         update_rotary_pos_emb(curriculum_seqlen)
-            args.curriculum_seqlen = curriculum_seqlen
-        args.curr_iteration = iteration
+            else:
+                curriculum_seqlen = args.seq_length # JUST SET IT TO THE TOTAL SEQUENCE LENGTH TO AVOID THE UNBOUNDLOCALERROR
+            args.curriculum_seqlen = curriculum_seqlen # THIS IS GIVING UnboundLocalError: local variable 'curriculum_seqlen' referenced before assignment
+            args.curr_iteration = iteration
             loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
                 train_step(forward_step_func,
                            train_data_iterator,

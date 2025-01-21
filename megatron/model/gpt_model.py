@@ -20,7 +20,7 @@ from megatron.model import LayerNorm, RMSNorm
 from .language_model import EmbeddingPipe
 from .transformer import ParallelTransformerLayerPipe, LMHeadPipe, get_num_experts_per_layer
 from deepspeed.pipe import PipelineModule, LayerSpec, TiedLayerSpec
-from deepspeed.sequence.fpdt_layer import FPDT_LogitsLoss
+# from deepspeed.sequence.fpdt_layer import FPDT_LogitsLoss # TdH 20250120 commented this out to work for newer deepspeed
 
 
 try:         

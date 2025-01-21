@@ -304,11 +304,12 @@ def forward_step(data_iterator, model):
     if args.curriculum_learning_legacy and args.curriculum_seqlen < args.seq_length:
         loss_mask = loss_mask[:, :args.curriculum_seqlen].contiguous()
 
-    moe_losses = []
-    for moe_loss in other_losses:
-        if moe_loss is not None:
-            moe_losses.append(moe_loss)
-    moe_loss = sum(moe_losses) * args.moe_loss_coeff
+    # moe_losses = []
+    # for moe_loss in other_losses:
+    #     if moe_loss is not None:
+    #         moe_losses.append(moe_loss)
+    # moe_loss = sum(moe_losses) * args.moe_loss_coeff
+    moe_loss = 0 # HACKED THIS since I'm not using MOE
 
     mos_loss = 0
     if args.mos or args.kd:

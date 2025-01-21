@@ -139,7 +139,8 @@ class Partition(object):
     def process_json_file(self, file_name):
         input_file_name, output_prefix = file_name
         print("Opening", input_file_name)
-        fin = open(input_file_name, 'r', encoding='utf-8')
+        # Filter empty lines while reading the file using a generator to avoid loading all data into memory
+        fin = (line for line in open(input_file_name, 'r', encoding='utf-8') if line.strip())
 
         startup_start = time.time()
         encoder = Encoder(self.args)
