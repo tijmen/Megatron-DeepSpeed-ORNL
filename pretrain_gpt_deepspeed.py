@@ -32,103 +32,169 @@ from datetime import timedelta
 
 master_port = "29500"
 default_pg_timeout = timedelta(minutes=1)
-def setup_distributed_env(init_method=None, rank = 0, world_size=16):
+def setup_distributed_env(init_method=None, rank=0, world_size=16):
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     world_size = comm.Get_size()
     world_rank = rank = comm.Get_rank()
-    backend = None
+    
+    # Get local rank for device assignment
+    proc_name = MPI.Get_processor_name()
+    all_procs = comm.allgather(proc_name)
+    local_rank = sum([i == proc_name for i in all_procs[:rank]])
+    
+    # Set the device before init_process_group
+    torch.cuda.set_device(local_rank)
+    
+    # Make sure CUDA initialization is done before process group init
+    torch.cuda.init()
+    torch.cuda.synchronize()
+    
+    backend = 'nccl'  # Explicitly set NCCL backend
     os.environ['MASTER_ADDR'] = master_addr
     os.environ['MASTER_PORT'] = master_port
     os.environ['WORLD_SIZE'] = str(world_size)
     os.environ['RANK'] = str(world_rank)
-    os.environ['LOCAL_RANK'] = "0"#str(world_rank % 8)
-    print("initialization parameters:", init_method, backend, rank, world_size)
+    os.environ['LOCAL_RANK'] = str(local_rank)
+    
+    print(f"Initializing process group: rank={world_rank}, local_rank={local_rank}, world_size={world_size}")
     torch.distributed.init_process_group(backend,
-                                        timeout=default_pg_timeout,
-                                        init_method=init_method,
-                                        rank=rank,
-                                        world_size=world_size)
-    using_mpi = torch.distributed.get_backend() == 'mpi'
-    print("using_mpi=", using_mpi)
+                                    timeout=default_pg_timeout,
+                                    init_method=init_method,
+                                    rank=rank,
+                                    world_size=world_size,
+                                    device_id=local_rank)
+    
+    # Add synchronization point after initialization
+    torch.distributed.barrier()
+    print(f"Process group initialized: rank={world_rank}, local_rank={local_rank}")
 
 def _set_env_variables(args):
-    # Call the init process
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     world_size = comm.Get_size()
     master_addr = args.master_addr
 
+    # Calculate local rank based on node-local process count
     proc_name = MPI.Get_processor_name()
     all_procs = comm.allgather(proc_name)
     local_rank = sum([i == proc_name for i in all_procs[:rank]])
+    
+    # Get number of processes on this node
+    procs_on_node = sum([i == proc_name for i in all_procs])
+    
+    # Get the number of visible devices before setting environment variables
+    try:
+        device_count = torch.cuda.device_count()
+    except:
+        device_count = 8  # Fallback value for ROCm/AMD
+    
+    # Modify local_rank to wrap around available devices
+    local_rank = local_rank % device_count
+    
+    # Set environment variables
     os.environ['RANK'] = str(rank)
     os.environ['WORLD_SIZE'] = str(world_size)
-    os.environ['LOCAL_RANK'] = "0"#str(local_rank)
+    os.environ['LOCAL_RANK'] = str(local_rank)
     os.environ['MASTER_ADDR'] = master_addr
     os.environ['MASTER_PORT'] = str(29500)
-    print("world_size, rank, master_addr, local_rank:", world_size, rank, master_addr, local_rank)
-
+    
+    # Set device visibility for this process
+    os.environ['HIP_VISIBLE_DEVICES'] = str(local_rank)
+    os.environ['ROCR_VISIBLE_DEVICES'] = str(local_rank)
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
+    
+    # AMD specific settings
+    os.environ['AMD_SERIALIZE_KERNEL'] = '3'
+    os.environ['HSA_ENABLE_SDMA'] = '0'
+    
+    # Store local_rank in args for DeepSpeed
+    args.local_rank = local_rank
+    
+    print(f"Rank {rank}: Setting up device mapping. "
+          f"Local rank: {local_rank}, "
+          f"Visible devices: {device_count}, "
+          f"Processes on node: {procs_on_node}")
+    
+    try:
+        # Force device initialization
+        if torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+            torch.cuda._lazy_init()
+        
+        # Always use device 0 since we're controlling via environment variables
+        torch.cuda.set_device(0)
+        current_device = torch.cuda.current_device()
+        device_props = torch.cuda.get_device_properties(current_device)
+        print(f"Rank {rank}: Successfully initialized device {current_device} ({device_props.name})")
+        
+    except Exception as e:
+        print(f"Rank {rank}: Error during device initialization: {str(e)}")
+        raise
+    
+    # Synchronize all processes
+    comm.Barrier()
+    return local_rank
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
-
     print_rank_0('building GPT model ...')
     see_memory_usage(f"Before Building Model", force=True)
 
     args = get_args()
-    _set_env_variables(args)
+    local_rank = _set_env_variables(args)
     config = core_transformer_config_from_args(args)
     
-    with deepspeed.zero.Init(data_parallel_group=mpu.get_data_parallel_group(),
-                             remote_device=None if args.remote_device == 'none' else args.remote_device,
-                             config_dict_or_path=args.deepspeed_config,
-                             enabled=args.zero_stage == 3,
-                             mpu=mpu):
-        if args.deepspeed and not args.no_pipeline_parallel:
-            model = GPTModelPipe(
-                config,
-                num_tokentypes=0,
-                parallel_output=True
-            )
-            # This is a hack to give us a reference to get_batch_pipe from within training.py
-            # We need to call model.set_batch_fn after deepspeed.initialize
-            model._megatron_batch_fn = get_batch_pipe
+    # Add synchronization before loading fused kernels
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    print(f"Rank {torch.distributed.get_rank()}: Before DeepSpeed initialization")
+    
+    try:
+        with deepspeed.zero.Init(data_parallel_group=mpu.get_data_parallel_group(),
+                                remote_device=None if args.remote_device == 'none' else args.remote_device,
+                                config_dict_or_path=args.deepspeed_config,
+                                enabled=args.zero_stage == 3,
+                                mpu=mpu):
+            if args.deepspeed and not args.no_pipeline_parallel:
+                model = GPTModelPipe(
+                    config,
+                    num_tokentypes=0,
+                    parallel_output=True
+                )
+                # This is a hack to give us a reference to get_batch_pipe from within training.py
+                # We need to call model.set_batch_fn after deepspeed.initialize
+                model._megatron_batch_fn = get_batch_pipe
 
-            # Predompute the attention mask and store it in args. This avoids having to
-            # pipeline it as an activation during training. The mask is constant, and thus
-            # we can reuse it.
-            attention_mask = torch.tril(torch.ones(
-                (1, args.seq_length, args.seq_length), device=get_accelerator().current_device_name())).view(
-                    1, 1, args.seq_length, args.seq_length)
+                # Predompute the attention mask and store it in args. This avoids having to
+                # pipeline it as an activation during training. The mask is constant, and thus
+                # we can reuse it.
+                attention_mask = torch.tril(torch.ones(
+                    (1, args.seq_length, args.seq_length), device=get_accelerator().current_device_name())).view(
+                        1, 1, args.seq_length, args.seq_length)
 
-            # Convert attention mask to binary:
-            attention_mask = (attention_mask < 0.5)
-            if args.fp16:
-                attention_mask = attention_mask.half()
-            elif args.bf16:
-                attention_mask = attention_mask.bfloat16()
+                # Convert attention mask to binary:
+                attention_mask = (attention_mask < 0.5)
+                if args.fp16:
+                    attention_mask = attention_mask.half()
+                elif args.bf16:
+                    attention_mask = attention_mask.bfloat16()
 
-            # Attention mask must be bool.
-            args.attn_mask = attention_mask.to(torch.bool)
+                # Attention mask must be bool.
+                args.attn_mask = attention_mask.to(torch.bool)
 
-        else:
-            model = GPTModel(
-                config,
-                num_tokentypes=0,
-                parallel_output=True,
-                pre_process=pre_process,
-                post_process=post_process
-            )
-    '''
-    model = GPTModel(
-                config,
-                num_tokentypes=0,
-                parallel_output=True,
-                pre_process=pre_process,
-                post_process=post_process
-            )
-    '''
+            else:
+                model = GPTModel(
+                    config,
+                    num_tokentypes=0,
+                    parallel_output=True,
+                    pre_process=pre_process,
+                    post_process=post_process
+                )
+    except Exception as e:
+        print(f"Rank {torch.distributed.get_rank()}: Error in DeepSpeed initialization: {str(e)}")
+        raise
+    
     see_memory_usage(f"After Building Model", force=True)
     return model
 

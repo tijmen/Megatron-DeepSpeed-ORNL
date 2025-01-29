@@ -48,10 +48,14 @@ try:
 except ImportError:
     flash_attn_func = None
 
+import sys
+print(f"TdH: Python path: {sys.path}")
 try:
     # FlashAttention-2
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
-except ImportError:
+    print(f"TdH: Successfully imported flash_attn_varlen_func: {flash_attn_varlen_func}")
+except ImportError as e:
+    print(f"TdH: Failed to import flash_attn_varlen_func: {str(e)}")
     flash_attn_varlen_func = None
 
 FlashAttentionBuilder = get_accelerator().get_op_builder("FlashAttentionBuilder")
