@@ -48,14 +48,10 @@ try:
 except ImportError:
     flash_attn_func = None
 
-import sys
-print(f"TdH: Python path: {sys.path}")
 try:
     # FlashAttention-2
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
-    print(f"TdH: Successfully imported flash_attn_varlen_func: {flash_attn_varlen_func}")
 except ImportError as e:
-    print(f"TdH: Failed to import flash_attn_varlen_func: {str(e)}")
     flash_attn_varlen_func = None
 
 FlashAttentionBuilder = get_accelerator().get_op_builder("FlashAttentionBuilder")
@@ -1656,12 +1652,6 @@ def get_num_experts_per_layer(num_experts: list, num_layers: int, expert_interva
     # the idea is that I am NOT using MoE, so we can just return a list of 1s
     return [1]*num_layers
 
-    print("TdH <debug>:")
-    print("num_experts:", num_experts)
-    print("num_layers:", num_layers)
-    print("expert_interval:", expert_interval)
-    print("offset:", offset)
-    print("</debug>")
     assert len(num_experts) == 1 or len(num_experts) == num_layers // expert_interval, \
         'num_experts must be either a single value or a list of the same length as the number of MoE layers'
     if len(num_experts) == 1:

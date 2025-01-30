@@ -16,11 +16,8 @@ os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 
 
 def load(args):
-    print("TdH: loading fused kernels with args: ", args)
-    print("TdH: Check if cuda 11 is installed for compute capability 8.0")
     # Check if cuda 11 is installed for compute capability 8.0
     cc_flag = []
-    print("TdH: torch version: ", torch.version.hip)
     if torch.version.hip is None:
         _, bare_metal_major, bare_metal_minor = _get_cuda_bare_metal_version(
             cpp_extension.CUDA_HOME)
@@ -40,7 +37,6 @@ def load(args):
             cc_flag.append('-gencode')
             cc_flag.append('arch=compute_90,code=sm_90')
 
-    print("TdH: creating build directory")
     # Build path
     srcpath = pathlib.Path(__file__).parent.absolute()
     buildpath = srcpath / 'build'
@@ -54,17 +50,6 @@ def load(args):
             extra_cuda_cflags=['-O3',
                                '-gencode', 'arch=compute_70,code=sm_70',
                                '--use_fast_math'] + extra_cuda_flags + cc_flag
-
-        print("TdH: extra cuda cflags in _cpp_extention_load_helper: ", extra_cuda_cflags)
-
-        print("TdH: calling cpp_extension.load with args")
-        print("name: ", name)
-        print("sources: ", sources)
-        print("build_directory: ", buildpath)
-        print("extra_cflags: ", ['-O3',])
-        print("extra_cuda_cflags: ", extra_cuda_cflags)
-        print("extra_include_paths: ", extra_include_paths)
-        print("verbose: ", (args.rank == 0))
 
         return cpp_extension.load(
             name=name,
@@ -86,7 +71,6 @@ def load(args):
         extra_include_paths=[]
 
     if args.masked_softmax_fusion:
-        print("TdH: loading masked softmax fusion")
         if torch.version.hip is not None:
              extra_cuda_flags = ['-D__HIP_NO_HALF_OPERATORS__=1',
                                 '-D__HIP_NO_HALF_CONVERSIONS__=1']
@@ -96,30 +80,23 @@ def load(args):
                                 '--expt-relaxed-constexpr',
                                 '--expt-extended-lambda']
         
-        print("TdH: extra cuda flags: ", extra_cuda_flags)
 
         # Upper triangular softmax.
         sources=[srcpath / 'scaled_upper_triang_masked_softmax.cpp',
                  srcpath / 'scaled_upper_triang_masked_softmax_cuda.cu']
-        print("TdH: loading helper for scaled_upper_triang_masked_softmax_cuda")
         scaled_upper_triang_masked_softmax_cuda = _cpp_extention_load_helper(
             "scaled_upper_triang_masked_softmax_cuda",
             sources, extra_cuda_flags, extra_include_paths)
-        print("TdH: done loading helper for scaled_upper_triang_masked_softmax_cuda")
         # Masked softmax.
         sources=[srcpath / 'scaled_masked_softmax.cpp',
                  srcpath / 'scaled_masked_softmax_cuda.cu']
-        print("TdH: loading helper for scaled_masked_softmax_cuda")
         scaled_masked_softmax_cuda = _cpp_extention_load_helper(
             "scaled_masked_softmax_cuda", sources, extra_cuda_flags, extra_include_paths)
-        print("TdH: done loading helper for scaled_masked_softmax_cuda")
         # Softmax
         sources=[srcpath / 'scaled_softmax.cpp',
                  srcpath / 'scaled_softmax_cuda.cu']
-        print("TdH: loading helper for scaled_softmax_cuda")
         scaled_softmax_cuda = _cpp_extention_load_helper(
             "scaled_softmax_cuda", sources, extra_cuda_flags, extra_include_paths)
-        print("TdH: done loading helper for scaled_softmax_cuda")
 
 def _get_cuda_bare_metal_version(cuda_dir):
     raw_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"],

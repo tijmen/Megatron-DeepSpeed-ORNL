@@ -151,29 +151,20 @@ def _compile_dependencies():
         start_time = time.time()
         print('> compiling and loading fused kernels ...', flush=True)
         if get_accelerator().device_count() > 0: # Skip when CPU-only
-            print("TdH: rank 0 -- loading fused kernels")
             fused_kernels.load(args)
-            print("TdH: rank 0 -- done loading fused kernels")
-        print("TdH: rank 0 -- starting barrier")
         torch.distributed.barrier()
-        print("TdH: rank 0 -- done barrier")
     else:
-        print("TdH: rank!=0 -- starting barrier")
         torch.distributed.barrier()
-        print("TdH: rank!=0 -- done barrier, loading fused kernels")
         fused_kernels.load(args)
-        print("TdH: rank!=0 -- done loading fused kernels")
     # Simple barrier to make sure all ranks have passed the
     # compilation phase successfully before moving on to the
     # rest of the program. We think this might ensure that
     # the lock is released.
-    print("TdH: next barrier call")
     torch.distributed.barrier()
     if is_rank_0():
         print('>>> done with compiling and loading fused kernels. '
               'Compilation time: {:.3f} seconds'.format(
                   time.time() - start_time), flush=True)
-    print("TdH: done with compiling dependencies")
 
 
 def setup_deepspeed_random_and_activation_checkpointing(args):

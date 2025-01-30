@@ -790,6 +790,7 @@ def train_step(forward_step_func, data_iterator,
                 losses_reduced_for_key = [x[key] for x in losses_reduced]
                 loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
             return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
+        
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
 
@@ -1386,9 +1387,9 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                 if args.save and not saved_checkpoint:
                     save_checkpoint_and_time(iteration, model, optimizer,
                                          opt_param_scheduler)
-            torch.distributed.barrier()
-            print_datetime('exiting program at iteration {}'.format(iteration))
-            sys.exit()
+                torch.distributed.barrier()
+                print_datetime('exiting program at iteration {}'.format(iteration))
+                sys.exit()
         trigger(on_step_end)
 
         # Exiting based on kill switch file

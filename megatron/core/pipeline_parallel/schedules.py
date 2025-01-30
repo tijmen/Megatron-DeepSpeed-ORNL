@@ -998,7 +998,6 @@ def forward_backward_pipelining_without_interleaving(*,
     stages.
 
     Returns dictionary with losses if the last stage, empty dict otherwise."""
-
     if isinstance(model, list):
         assert len(model) == 1, \
             "non-interleaved pipeline parallelism does not support model chunking"
@@ -1056,7 +1055,6 @@ def forward_backward_pipelining_without_interleaving(*,
         max_outstanding_backprops = num_warmup_microbatches + 1
 
     model_type = get_model_type(model)
-
     rank = parallel_state.get_pipeline_model_parallel_rank()
     recv_tensor_shapes = get_tensor_shapes(rank=rank-1,
                                            model_type=model_type,
@@ -1070,7 +1068,6 @@ def forward_backward_pipelining_without_interleaving(*,
                                            micro_batch_size=micro_batch_size,
                                            decoder_seq_length=decoder_seq_length,
                                            config=config)
-
     # Input, output tensors only need to be saved when doing backward passes
     input_tensors = None
     output_tensors = None

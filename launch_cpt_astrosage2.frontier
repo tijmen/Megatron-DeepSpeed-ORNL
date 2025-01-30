@@ -4,15 +4,17 @@
 #SBATCH -J dash23
 #SBATCH -o logs/dash23-%j.o
 #SBATCH -e logs/dash23-%j.e
-#SBATCH -t 00:20:00
+#SBATCH -t 02:00:00
 #SBATCH -p batch
-#SBATCH -N 2
+#SBATCH -N 5
 
 # use the Dash et al. (2023) method to performed continued pretraining on astrosage
 
 set +x
 source $HOME/miniforge3/bin/activate
 conda activate dash23
+
+cd
 
 export LD_PRELOAD="/usr/lib64/libcrypto.so /usr/lib64/libssh.so.4 /usr/lib64/libssl.so.1.1"
 module load PrgEnv-gnu
@@ -76,21 +78,21 @@ echo $ranks_per_node $gpus_per_rank $ranks_total
 mkdir -p logs
 mkdir -p logs/transformer
 
-export CHECKPOINT_PATH=$HOME/models/astrosage-8b
+export CHECKPOINT_PATH=$HOME/models/astrosage-70b
 export DATA_PATH=$HOME/datasets/astrosage_cpt_text_document
 
 export GPT_ARGS="--tensor-model-parallel-size 4 \
-          --pipeline-model-parallel-size 2 \
-          --num-layers 32 \
-          --hidden-size 4096 \
-          --num-attention-heads 32 \
+          --pipeline-model-parallel-size 5 \
+          --num-layers 80 \
+          --hidden-size 8192 \
+          --num-attention-heads 64 \
           --seq-length 8192 \
           --max-position-embeddings 8192 \
-  	  --micro-batch-size 1 \
-	  --global-batch-size 2 \
+  	  --micro-batch-size 2 \
+	  --global-batch-size 4 \
       --tokenizer-type HFTokenizer \
-    --tokenizer-model $HOME/models/llama-3.1-8b/ \
-    --load $HOME/models/llama-3.1-8b/ \
+    --tokenizer-model $HOME/models/llama-3.1-70b/ \
+    --load $HOME/models/llama-3.1-70b/ \
 	  --train-samples 1000 \
        	  --lr-decay-samples 200 \
           --lr-warmup-samples 100 \
@@ -98,9 +100,9 @@ export GPT_ARGS="--tensor-model-parallel-size 4 \
 	  --min-lr 6.0e-6 \
           --lr-decay-style cosine \
           --log-interval 10 \
-          --eval-iters 40 \
-          --eval-interval 100 \
-	  --save-interval 1000 \
+          --eval-iters 10 \
+          --eval-interval 40 \
+	  --save-interval 100 \
           --split 98,2,0 \
           --clip-grad 1.0 \
 	  --weight-decay 0.1 \
@@ -117,11 +119,6 @@ export GPT_ARGS="--tensor-model-parallel-size 4 \
        --disable-bias-linear \
        --normalization rmsnorm \
        --use-flash-attn-v2"
-
-export OUTPUT_ARGS="--log-interval 10 \
-             --save-interval 500 \
-             --eval-interval 100 \
-             --eval-iters 10"
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export OMP_NUM_THREADS=2
