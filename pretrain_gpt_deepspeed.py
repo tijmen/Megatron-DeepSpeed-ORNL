@@ -27,7 +27,6 @@ import subprocess
 from torch import nn
 import torch.nn.functional as F
 from mpi4py import MPI
-import os
 from datetime import timedelta
 
 master_port = "29500"
@@ -51,7 +50,6 @@ def setup_distributed_env(init_method=None, rank=0, world_size=16):
     torch.cuda.synchronize()
     
     backend = 'nccl'  # Explicitly set NCCL backend
-    os.environ['MASTER_ADDR'] = master_addr
     os.environ['MASTER_PORT'] = master_port
     os.environ['WORLD_SIZE'] = str(world_size)
     os.environ['RANK'] = str(world_rank)

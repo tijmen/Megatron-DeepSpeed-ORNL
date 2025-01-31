@@ -4,61 +4,55 @@
 #SBATCH -J dash23
 #SBATCH -o logs/dash23-%j.o
 #SBATCH -e logs/dash23-%j.e
-#SBATCH -t 02:00:00
+#SBATCH -t 00:29:59
 #SBATCH -p batch
+#SBATCH -q debug
 #SBATCH -N 5
 
-# use the Dash et al. (2023) method to performed continued pretraining on astrosage
-
+cd
 set +x
 source $HOME/miniforge3/bin/activate
 conda activate dash23
 
-cd
-
-export LD_PRELOAD="/usr/lib64/libcrypto.so /usr/lib64/libssh.so.4 /usr/lib64/libssl.so.1.1"
 module load PrgEnv-gnu
 module load gcc/12.2.0
 module load rocm/6.3.1
 
-# try this
-# module load craype-accel-amd-gfx90a
-# export TORCH_CUDA_ARCH_LIST="gfx90a"
-
+export LD_PRELOAD="/usr/lib64/libcrypto.so /usr/lib64/libssh.so.4 /usr/lib64/libssl.so.1.1"
 export ROCM_HOME=/opt/rocm-6.3.1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
-export NCCL_DEBUG=INFO
-# export settings
 export TORCH_EXTENSIONS_DIR=$PWD/deepspeed
 export HF_HOME=$PWD/hfdata
 export OMP_NUM_THREADS=1
 export HSA_DISABLE_CACHE=1
+export FI_CXI_ATS=0
+export LD_LIBRARY_PATH=/opt/rocm-6.3.1/lib:/opt/rocm-6.3.1/hip/lib:/opt/rocm-6.3.1/rccl/build:$HOME/libs:/opt/cray/libfabric/1.15.2.0/lib64/:/opt/rocm-6.3.1/lib:/opt/rocm-6.1.3/lib/:$LD_LIBRARY_PATH
+export NCCL_NET_GDR_LEVEL=3
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export OMP_NUM_THREADS=2
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NCCL_IB_TIMEOUT=23
+export NCCL_DEBUG=WARN # supress INFO-level messages
+export NCCL_DEBUG_SUBSYS=ALL
+export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
+export NCCL_IB_DISABLE=0
+export NCCL_P2P_DISABLE=0
+export NCCL_NET_GDR_LEVEL=3
+export NCCL_PROTO=simple
 
-# setup hostfile
 HOSTS=.hosts-job$SLURM_JOB_ID
 HOSTFILE=hostfile.txt
 srun hostname > $HOSTS
 sed 's/$/ slots=8/' $HOSTS > $HOSTFILE
 
-# setup env file
 echo "PATH=$PATH" > .deepspeed_env
 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> .deepspeed_env
 echo "CPATH=$CPATH" >> .deepspeed_env
 echo "TORCH_EXTENSIONS_DIR=$PWD/deepspeed" >> .deepspeed_env
 echo "HF_HOME=$PWD/hfdata" >> .deepspeed_env
 echo "ROCM_HOME=/opt/rocm-6.3.1" >> .deepspeed_env
-
-
-export FI_CXI_ATS=0
-
-# Update LD_LIBRARY_PATH to include ROCm libraries
-export LD_LIBRARY_PATH=/opt/rocm-6.3.1/lib:/opt/rocm-6.3.1/hip/lib:/opt/rocm-6.3.1/rccl/build:$HOME/libs:/opt/cray/libfabric/1.15.2.0/lib64/:/opt/rocm-6.3.1/lib:/opt/rocm-6.1.3/lib/:$LD_LIBRARY_PATH
-
-export NCCL_NET_GDR_LEVEL=3
-
-# additional line required to avoid c10d error of GPUs unable to communicate
-export NCCL_PROTO=simple
 
 scontrol show hostnames $SLURM_NODELIST > job.node.list
 input="./job.node.list"
@@ -75,21 +69,22 @@ gpus_per_rank=$((8/$ranks_per_node))
 ranks_total=$(($ranks_per_node*$SLURM_JOB_NUM_NODES))
 
 echo $ranks_per_node $gpus_per_rank $ranks_total
-mkdir -p logs
-mkdir -p logs/transformer
 
 export CHECKPOINT_PATH=$HOME/models/astrosage-70b
-export DATA_PATH=$HOME/datasets/astrosage_cpt_text_document
+export DATA_PATH=$HOME/datasets/astrosage_preprocessed_text_document
 
-export GPT_ARGS="--tensor-model-parallel-size 4 \
+export GPT_ARGS="--tensor-model-parallel-size 8 \
           --pipeline-model-parallel-size 5 \
           --num-layers 80 \
           --hidden-size 8192 \
           --num-attention-heads 64 \
           --seq-length 8192 \
           --max-position-embeddings 8192 \
-  	  --micro-batch-size 2 \
-	  --global-batch-size 4 \
+          --num-key-value-heads 8 \
+          --use-rotary-position-embeddings \
+          --rotary-position-embeddings-theta 500000 \
+  	  --micro-batch-size 1 \
+	  --global-batch-size 2 \
       --tokenizer-type HFTokenizer \
     --tokenizer-model $HOME/models/llama-3.1-70b/ \
     --load $HOME/models/llama-3.1-70b/ \
@@ -119,26 +114,6 @@ export GPT_ARGS="--tensor-model-parallel-size 4 \
        --disable-bias-linear \
        --normalization rmsnorm \
        --use-flash-attn-v2"
-
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export OMP_NUM_THREADS=2
-
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-# Add these environment variables for better NCCL communication
-export NCCL_IB_TIMEOUT=23
-export NCCL_DEBUG=WARN
-export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
-
-# Modify the existing NCCL settings
-export NCCL_NET_GDR_LEVEL=3
-export NCCL_PROTO=simple
-
-export NCCL_DEBUG=WARN
-export NCCL_DEBUG_SUBSYS=ALL
-export NCCL_IB_DISABLE=0
-export NCCL_P2P_DISABLE=0
 
 # check that we can import torch, deepspeed, and apex
 #python -c "import torch; import deepspeed; import apex; import amp_C"
