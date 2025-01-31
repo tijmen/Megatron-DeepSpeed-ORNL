@@ -7,7 +7,7 @@
 #SBATCH -t 00:29:59
 #SBATCH -p batch
 #SBATCH -q debug
-#SBATCH -N 5
+#SBATCH -N 10
 
 cd
 set +x
@@ -81,10 +81,12 @@ export GPT_ARGS="--tensor-model-parallel-size 8 \
           --seq-length 8192 \
           --max-position-embeddings 8192 \
           --num-key-value-heads 8 \
+          --ffn-hidden-size 28672 \
           --use-rotary-position-embeddings \
           --rotary-position-embeddings-theta 500000 \
   	  --micro-batch-size 1 \
 	  --global-batch-size 2 \
+      --force-ds-sequence-parallel \
       --tokenizer-type HFTokenizer \
     --tokenizer-model $HOME/models/llama-3.1-70b/ \
     --load $HOME/models/llama-3.1-70b/ \

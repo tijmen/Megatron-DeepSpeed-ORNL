@@ -548,7 +548,9 @@ class TransformerLanguageModel(MegatronModule):
                     rotary_pos_emb_cos, rotary_pos_emb_sin = self.rotary_pos_emb(self.seq_length)
                     rotary_pos_emb_cos.no_checkpointing = True
                     rotary_pos_emb_sin.no_checkpointing = True
-                    rotary_pos_emb = (rotary_pos_emb_cos.to(encoder_input.dtype), rotary_pos_emb_sin.to(encoder_input.dtype))
+                    # Get dtype from encoder_input if available, otherwise use default params dtype
+                    target_dtype = encoder_input.dtype if encoder_input is not None else args.params_dtype
+                    rotary_pos_emb = (rotary_pos_emb_cos.to(target_dtype), rotary_pos_emb_sin.to(target_dtype))
 
         # Run encoder.
         if enc_hidden_states is None:
