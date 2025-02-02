@@ -38,17 +38,17 @@ def save_checkpoint(queue, args):
         from megatron.core import mpu
     except ModuleNotFoundError:
         print("Unable to import Megatron, please specify the path to Megatron using --megatron-path. Exiting.")
-        exit(1)
+        sys.exit(1)
 
     def queue_get(name=None):
         val = queue.get()
         if val == "exit":
             print("Loader exited, exiting saver")
-            exit(1)
+            sys.exit(1)
         if name is not None and args.checking and val["name"] != name:
             val_name = val["name"]
             print(f'Unexpected message. Expecting "{name}" but got "{val_name}". Exiting saver.')
-            exit(1)
+            sys.exit(1)
         if name is not None:
             print(f"received {name}")
         return val
@@ -62,7 +62,7 @@ def save_checkpoint(queue, args):
             for key in msg.keys():
                 print(f"   {key}")
             print(f"Exiting. If you want to ignore this, use the argument --no-checking.")
-            exit(1)
+            sys.exit(1)
 
 
     md = queue_get()
@@ -97,6 +97,7 @@ def save_checkpoint(queue, args):
                 '--num-attention-heads', str(md.num_attention_heads),
                 '--max-position-embeddings', str(md.max_position_embeddings),
                 '--tokenizer-type', str(md.tokenizer_type),
+                '--tokenizer-model', str(md.tokenizer_model),
                 '--tensor-model-parallel-size', str(args.target_tensor_parallel_size),
                 '--pipeline-model-parallel-size', str(args.target_pipeline_parallel_size),
                 '--no-masked-softmax-fusion',
@@ -330,7 +331,7 @@ def save_checkpoint(queue, args):
                 msg = queue_get("output layer")
                 if not hasattr(models[0].language_model, 'output_layer'):
                     print("ERROR: got an output layer, but model does not have one")
-                    exit(1)
+                    sys.exit(1)
                 output_layer_weight = torch.chunk(msg.pop("weight"), args.target_tensor_parallel_size, dim=0)
                 for tp_rank in range(args.target_tensor_parallel_size):
                     models[tp_rank].language_model.output_layer.weight.data.copy_(output_layer_weight[tp_rank])
@@ -341,7 +342,7 @@ def save_checkpoint(queue, args):
             if msg != "done" and msg["name"] == "pooler":
                 if not hasattr(models[0].language_model, 'pooler'):
                     print("ERROR: got a pooler, but model does not have one")
-                    exit(1)
+                    sys.exit(1)
                 print("received pooler")
                 pooler_weight = msg.pop("weight")
                 pooler_bias = msg.pop("bias")
@@ -356,7 +357,7 @@ def save_checkpoint(queue, args):
             if msg != "done" and msg["name"] == "lm head":
                 if not hasattr(models[0], 'lm_head'):
                     print("ERROR: got an lm head, but model does not have one")
-                    exit(1)
+                    sys.exit(1)
                 print("received lm head")
                 lm_head_dense_weight = msg.pop("dense weight")
                 lm_head_dense_bias = msg.pop("dense bias")
@@ -373,7 +374,7 @@ def save_checkpoint(queue, args):
             if msg != "done" and msg["name"] == "binary head":
                 if not hasattr(models[0], 'binary_head'):
                     print("ERROR: got a binary head, but model does not have one")
-                    exit(1)
+                    sys.exit(1)
                 print("received binary head")
                 binary_head_weight = msg.pop("weight")
                 binary_head_bias = msg.pop("bias")
