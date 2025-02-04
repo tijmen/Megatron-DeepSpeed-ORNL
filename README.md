@@ -1,3 +1,8 @@
+# Important Note
+This is a fork of sajal-vt/Megatron-DeepSpeed-ORNL frontier-sd branch hacked together for fine tuning llama-3.1-70b.
+
+# Original README
+
 ## Latest News
 * [2023/07] Synced with [upstream](https://github.com/NVIDIA/Megatron-LM) over 1k commits, see [rebase folder for more details](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/rebase) in terms of features and updated performance.
 
