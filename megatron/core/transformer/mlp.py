@@ -33,9 +33,9 @@ class MLP(MegatronModule):
         self.config: TransformerConfig = config
 
         # If this is a gated linear unit we double the output width, see https://arxiv.org/pdf/2002.05202.pdf
-        ffn_hidden_size = self.config.ffn_hidden_size
+        ffn_hidden_size = 28672 # TdH: force 70B FFN hidden size
         if self.config.gated_linear_unit:
-            ffn_hidden_size *= 2
+            ffn_hidden_size *= 2 # TdH: this is concatenating the gate and up weights
 
         self.linear_fc1 = TEColumnParallelLinear(
             self.config.hidden_size,

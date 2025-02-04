@@ -143,6 +143,27 @@ class TransformerConfig(ModelParallelConfig):
     recompute_method: str = None
     recompute_num_layers: int = None
     distribute_saved_activations: bool = None
+  
+    # TdH: hard coding the LLAMA-3.1 architecture choices for now
+    num_layers: int = 80
+    hidden_size: int = 8192
+    ffn_hidden_size: int = 28672
+    num_attention_heads: int = 64
+    num_key_value_heads: int = 8
+    swiglu: bool = True
+    add_bias_linear: bool = False
+    sequence_length: int = 8192
+    true_vocab_size: int = 128000
+    make_vocab_size_divisible_by: int = 128
+    tensor_model_parallel_size: int = 8
+    pipeline_model_parallel_size: int = 5
+    untie_embeddings_and_output_weights: bool = True
+    position_embeddings: bool = False
+    linear_bias: bool = False
+    params_dtype: torch.dtype = torch.bfloat16
+    use_rotary_position_embeddings: bool = True
+    rotary_position_embeddings_theta: int = 500000
+
 
     def __post_init__(self):
         """ Python dataclass method that is used to modify attributes after initialization.

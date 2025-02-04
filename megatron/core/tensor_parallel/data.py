@@ -100,6 +100,14 @@ def broadcast_data(keys, data, datatype):
     if rank == 0:
         # Check that all keys have the same data type.
         _check_data_types(keys, data, datatype)
+        # Print debugging info about data sizes
+        print(f"TdHTdH: Flattening data with {len(keys)} keys")
+        print(f"TdHTdH: Total elements to flatten: {total_numel}")
+        for key in keys:
+            print(f"TdHTdH: Key: {key}")
+            print(f"TdHTdH:   Shape: {data[key].shape}")
+            print(f"TdHTdH:   Elements: {key_numel[key]}")
+            print(f"TdHTdH:   Memory (GB): {data[key].element_size() * key_numel[key] / (1024**3):.2f}")
         # Flatten the data associated with the keys
         flatten_data = torch.cat(
             [data[key].contiguous().view(-1) for key in keys], dim=0).to(get_accelerator().device_name())

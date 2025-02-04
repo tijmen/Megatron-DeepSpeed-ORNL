@@ -278,7 +278,7 @@ def validate_args(args, defaults={}):
         # the same ballpark as the counterpart with 4*h size
         # we keep it a multiple of 64, which means the actual tensor size
         # will be a multiple of 64 / tp_size
-        args.ffn_hidden_size = int((4 * args.hidden_size * 2 / 3) / 64) * 64
+        args.ffn_hidden_size = 28672 # FORCE LLAMA-3.1 70B FFN HIDDEN SIZE
 
     if args.kv_channels is None:
         assert args.hidden_size % args.num_attention_heads == 0

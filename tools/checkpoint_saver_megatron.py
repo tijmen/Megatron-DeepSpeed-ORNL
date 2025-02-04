@@ -241,6 +241,10 @@ def save_checkpoint(queue, args):
     mpu.set_pipeline_model_parallel_rank(0)
     post_process = args.target_pipeline_parallel_size == 1
     models = get_models(args.target_tensor_parallel_size, md.params_dtype, True, post_process)
+    # TdH: ok, how the hell are these models getting their config?
+    # let's at least print the ffn_hidden_size
+    print(f"TdH: models[0].language_model.encoder.layers[0].mlp.dense_h_to_4h.weight.shape[0]: {models[0].language_model.encoder.layers[0].mlp.dense_h_to_4h.weight.shape[0]}")
+
     for tp_rank, model in enumerate(models):
         model.language_model.embedding.word_embeddings.weight.data.copy_(out_word_embed[tp_rank])
         if md.position_embeddings:
@@ -276,6 +280,7 @@ def save_checkpoint(queue, args):
             mlp_l1_weight = torch.chunk(msg.pop("mlp l1 weight"), args.target_tensor_parallel_size, dim=1)
 
             # Special handling for swiglu
+            assert md.swiglu, "SwiGLU appears to be OFF!"
             if md.swiglu:
                 mlp_l0_weight_W = torch.chunk(msg.pop("mlp l0 weight W"), args.target_tensor_parallel_size, dim=0)
                 mlp_l0_weight_V = torch.chunk(msg.pop("mlp l0 weight V"), args.target_tensor_parallel_size, dim=0)
@@ -283,6 +288,7 @@ def save_checkpoint(queue, args):
             else:
                 mlp_l0_weight = torch.chunk(msg.pop("mlp l0 weight"), args.target_tensor_parallel_size, dim=0)
 
+            assert not md.linear_bias, "Linear bias appears to be ON!"
             if md.linear_bias:
                 qkv_bias = torch.chunk(msg.pop("qkv bias"), args.target_tensor_parallel_size, dim=0)
                 if md.swiglu:
@@ -301,6 +307,8 @@ def save_checkpoint(queue, args):
                 l.self_attention.dense.weight.data.copy_(dense_weight[tp_rank])
                 l.post_attention_layernorm.weight.data.copy_(post_layernorm_weight)
                 l.post_attention_layernorm.bias.data.copy_(post_layernorm_bias)
+                if l.mlp.dense_h_to_4h.weight.shape[0] != mlp_l0_weight[tp_rank].shape[0]:
+                    print(f"WARNING: MLP layer {layer} has a different shape for dense_h_to_4h weight: expected {l.mlp.dense_h_to_4h.weight.shape} vs mlp_l0_weight's {mlp_l0_weight[tp_rank].shape}")
                 l.mlp.dense_h_to_4h.weight.data.copy_(mlp_l0_weight[tp_rank])
                 l.mlp.dense_4h_to_h.weight.data.copy_(mlp_l1_weight[tp_rank])
                 if md.linear_bias:

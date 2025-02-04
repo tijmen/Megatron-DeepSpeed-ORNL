@@ -108,6 +108,7 @@ python $HOME/Megatron-DeepSpeed-ORNL/pretrain_gpt_deepspeed.py \
     --ffn-hidden-size 28672 \
     --use-rotary-position-embeddings \
     --rotary-position-embeddings-theta 500000 \
+    --vocab-size 128256 \
     --micro-batch-size 1 \
     --global-batch-size 1 \
     --attention-dropout 0.0 \
@@ -146,4 +147,5 @@ python $HOME/Megatron-DeepSpeed-ORNL/pretrain_gpt_deepspeed.py \
     --save $CHECKPOINT_PATH \
     --master-addr=$MASTER_ADDR \
     --data-path $DATA_PATH \
+    --data-impl mmap \
     --num-workers 1" 2>&1
