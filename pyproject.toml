@@ -1,0 +1,12 @@
+[tool.black]
+line-length = 150
+target-version = ['py310']
+
+[tool.pylint.format]
+max-line-length = 150
+
+[tool.autopep8]
+max-line-length = 150
+
+[tool.flake8]
+max-line-length = 150
